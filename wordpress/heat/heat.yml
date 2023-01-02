@@ -1,0 +1,223 @@
+heat_template_version: wallaby
+
+parameters:
+    image:
+        type: string
+        description: Image to use for the instance
+        default: debian-10.13.7-20221101
+    flavor:
+        type: string
+        description: Flavor to use for the instance
+        default: m1.small
+    key_name:
+        type: string
+        description: Name of the keypair to use for the instance
+        default: laptop
+
+    db_name:
+      type: string
+      description: WordPress database name
+      default: wordpress
+
+    db_username:
+      type: string
+      description: The WordPress database admin account username
+      default: admin
+      hidden: true
+
+    db_password:
+      type: string
+      description: The WordPress database admin account password
+      default: admin
+      hidden: true
+
+    db_root_password:
+      type: string
+      description: Root password for MySQL
+      default: admin
+      hidden: true
+
+    floating_network_id:
+      type: string
+      description: name of a Neutron external network
+      default: public1
+
+resources:
+
+  # Network
+  network:
+    type: OS::Neutron::Net
+    properties:
+      name: wp_network
+      admin_state_up: true
+
+  # Subnet for the network
+  subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      name: wp_subnet
+      network_id: { get_resource: network }
+      ip_version: 4
+      gateway_ip: 10.69.0.254
+      cidr: 10.69.0.0/24
+      dns_nameservers:
+        - 1.1.1.1
+
+  # Router for the public network with an interface to the private subnetwork
+  router:
+     type: OS::Neutron::Router
+     properties:
+       name: wp_router
+       external_gateway_info:
+         network: { get_param: floating_network_id }
+
+  router_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router: { get_resource: router }
+      subnet: { get_resource: subnet }
+
+
+  # Security group for the web instance
+  ssh_http_https:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: ssh_http_https
+      description: 
+        
+      rules:
+        - protocol: tcp
+          port_range_min: 22
+          port_range_max: 22
+          remote_ip_prefix: 0.0.0.0/0
+        - protocol: tcp
+          port_range_min: 80
+          port_range_max: 80
+          remote_ip_prefix: 0.0.0.0/0
+        - protocol: tcp
+          port_range_min: 443
+          port_range_max: 443
+          remote_ip_prefix: 0.0.0.0/0
+
+  # Security group for database and web server
+  icmp:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: icmp
+      rules:
+        - protocol: icmp
+          direction: ingress
+          ethertype: IPv4
+
+  # Security group for database server
+  mysql:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: mysql
+      description: SSH, HTTP, HTTPS
+      rules:
+        - protocol: tcp
+          port_range_min: 22
+          port_range_max: 22
+          remote_ip_prefix: 0.0.0.0/0
+        - protocol: tcp
+          port_range_min: 3306
+          port_range_max: 3306
+          remote_ip_prefix: 0.0.0.0/0
+
+  mysql_port:
+    type: OS::Neutron::Port
+    properties:
+      name: mysql_port
+      network_id: { get_resource: network }
+      fixed_ips:
+        - subnet_id: { get_resource: subnet }
+      security_groups:
+        - mysql
+        - icmp
+
+  # Database server instance
+  mysql_server:
+    type: OS::Nova::Server
+    properties:
+      name: mysql_server
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      networks:
+        - port: { get_resource: mysql_port }
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash
+            apt-get update
+            apt-get install -y curl
+            echo INSTALL DOCKER
+            curl -fsSL https://get.docker.com -o get-docker.sh
+            sh get-docker.sh
+            echo RUN MYSQL
+            docker run -d --name mysql --restart always -p 3306:3306 \
+              -e MYSQL_DATABASE=db_name \
+              -e MYSQL_USER=db_username \
+              -e MYSQL_PASSWORD=db_password \
+              -e MYSQL_ROOT_PASSWORD=db_root_password \
+              mysql:5.7
+          params:
+           db_name: { get_param: db_name }
+           db_user: { get_param: db_username }
+           db_password: { get_param: db_password }
+           db_root_password: { get_param: db_root_password }
+
+  web_port:
+    type: OS::Neutron::Port
+    properties:
+      name: web_port
+      network_id: { get_resource: network }
+      fixed_ips:
+        - subnet_id: { get_resource: subnet }
+      security_groups:
+        - ssh_http_https
+        - icmp
+
+  # Web server instance
+  web_server:
+    type: OS::Nova::Server
+    properties:
+      name: web_server
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      key_name: {get_param: key_name}
+      networks:
+        - port: { get_resource: web_port }
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash
+            apt-get update
+            apt-get install -y curl
+            echo INSTALL DOCKER
+            curl -fsSL https://get.docker.com -o get-docker.sh
+            sh get-docker.sh
+            echo RUN WORDPRESS
+            docker run -d --name wordpress --restart always -p 80:80 -p 443:443 \
+              -e WORDPRESS_DB_NAME=db_name \
+              -e WORDPRESS_DB_USER=db_username \
+              -e WORDPRESS_DB_PASSWORD=db_password \
+              -e WORDPRESS_DB_HOST=db_host \
+              wordpress   
+          params:
+           db_name: { get_param: db_name }
+           db_user: { get_param: db_username }
+           db_password: { get_param: db_password }
+           db_host: { get_attr: [ mysql_server, first_address] }
+
+
+  # Public IP for web server
+  floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network_id: { get_param: floating_network_id }
+      port_id: { get_resource: web_port }
+
+outputs:
+  floating_ip:
+    value: { get_attr: [ floating_ip, floating_ip_address ] }
