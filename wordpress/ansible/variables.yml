@@ -1,0 +1,8 @@
+image: debian11-genericcloud
+flavor: m1.small
+key_name: laptop
+db_name: wordpress
+db_username: admin
+db_password: admin
+db_root_password: admin
+floating_network_id: public

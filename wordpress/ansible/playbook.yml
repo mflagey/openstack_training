@@ -1,0 +1,160 @@
+---
+- name: Deploy a wordpress connected to a database
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars_files:
+    - variables.yml
+
+  tasks:
+    - name: Create a network
+      openstack.cloud.network:
+        name: wp_network
+        admin_state_up: true
+        state: present
+
+    - name: Create a subnet
+      openstack.cloud.subnet:
+        name: wp_subnet
+        network_name: wp_network
+        ip_version: 4
+        gateway_ip: 10.69.0.254
+        cidr: 10.69.0.0/24
+        dns_nameservers:
+          - 1.1.1.1
+
+    - name: Create a router
+      openstack.cloud.router:
+        name: wp_router
+        network: '{{ floating_network_id }}'
+        state: present
+        interfaces:
+          - wp_subnet
+
+    - name: Create a security group ssh_http_https
+      openstack.cloud.security_group:
+        name: ssh_http_https
+        description: "SSH, HTTP, HTTPS"
+        state: present
+
+    - name: Create a security group rule for SSH
+      openstack.cloud.security_group_rule:
+        security_group: ssh_http_https
+        protocol: tcp
+        port_range_min: 22
+        port_range_max: 22
+        remote_ip_prefix: 0.0.0.0/0
+        state: present
+
+    - name: Create a security group rule for HTTP
+      openstack.cloud.security_group_rule:
+        security_group: ssh_http_https
+        protocol: tcp
+        port_range_min: 80
+        port_range_max: 80
+        remote_ip_prefix: 0.0.0.0/0
+        state: present
+
+    - name: Create a security group rule for HTTPS
+      openstack.cloud.security_group_rule:
+        security_group: ssh_http_https
+        protocol: tcp
+        port_range_min: 443
+        port_range_max: 443
+        remote_ip_prefix: 0.0.0.0/0
+        state: present
+
+    - name: Create a security group icmp
+      openstack.cloud.security_group:
+        name: icmp
+        state: present
+
+    - name: Create a security group rule for ICMP
+      openstack.cloud.security_group_rule:
+        security_group: icmp
+        protocol: icmp
+        direction: ingress
+        ethertype: IPv4
+        state: present
+
+    - name: Create a security group mysql
+      openstack.cloud.security_group:
+        name: mysql
+        state: present
+
+    - name: Create a security group rule for MySQL
+      openstack.cloud.security_group_rule:
+        security_group: mysql
+        protocol: tcp
+        port_range_min: 3306
+        port_range_max: 3306
+        remote_ip_prefix: 0.0.0.0/0
+
+    - name: Create database
+      register: database_server
+      openstack.cloud.server:
+        name: mysql_server
+        image: '{{ image }}'
+        flavor: '{{ flavor }}'
+        security_groups:
+          - icmp
+          - mysql
+        network: wp_network
+        state: present
+        wait: true
+        auto_ip: false
+        userdata: |
+          #!/bin/bash
+          apt-get update
+          apt-get install -y curl
+          echo INSTALL DOCKER
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sh get-docker.sh
+          echo RUN MYSQL
+          docker run -d --name mysql --restart always -p 3306:3306 \
+            -e MYSQL_DATABASE={{ db_name }} \
+            -e MYSQL_USER={{ db_username }} \
+            -e MYSQL_PASSWORD={{ db_password }} \
+            -e MYSQL_ROOT_PASSWORD={{ db_root_password }} \
+            mysql:5.7
+
+    - name: Create wordpress
+      vars:
+        db_host: "{{ database_server.openstack.addresses['wp_network'][0]['addr'] }}"
+      openstack.cloud.server:
+        name: web_server
+        image: '{{ image }}'
+        flavor: '{{ flavor }}'
+        key_name: '{{ key_name }}'
+        security_groups:
+          - icmp
+          - ssh_http_https
+        network: wp_network
+        state: present
+        wait: false
+        userdata: |
+          #!/bin/bash
+          apt-get update
+          apt-get install -y curl
+          echo INSTALL DOCKER
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sh get-docker.sh
+          echo RUN WORDPRESS
+          docker run -d --name wordpress --restart always -p 80:80 -p 443:443 \
+            -e WORDPRESS_DB_NAME={{ db_name }} \
+            -e WORDPRESS_DB_USER={{ db_username }} \
+            -e WORDPRESS_DB_PASSWORD={{ db_password }} \
+            -e WORDPRESS_DB_HOST={{ db_host }} \
+            wordpress
+
+    - name: Create floating IP
+      register: floating_ip
+      openstack.cloud.floating_ip:
+        network: '{{ floating_network_id }}'
+        state: present
+        wait: true
+        server: web_server
+
+    - name: Get floating IP
+      debug:
+        msg: "Floating IP: {{ floating_ip.floating_ip.floating_ip_address }}"

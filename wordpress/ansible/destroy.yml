@@ -1,0 +1,64 @@
+---
+- name: Delete Wordpress
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars_files:
+    - variables.yml
+  tasks:
+
+    - name: Get floating ip
+      register: floating_ip
+      openstack.cloud.floating_ip:
+        state: present
+        server: web_server
+        wait: true
+
+    - name: Delete floating ip
+      openstack.cloud.floating_ip:
+        network: '{{ floating_network_id }}'
+        server: web_server
+        floating_ip_address: "{{ floating_ip.floating_ip.floating_ip_address }}"
+        purge: true
+        state: absent
+
+
+    - name: Delete database
+      openstack.cloud.server:
+        name: mysql_server
+        state: absent
+
+    - name: Delete wordpress
+      openstack.cloud.server:
+        name: web_server
+        state: absent
+
+    - name: Delete router
+      openstack.cloud.router:
+        state: absent
+        name: wp_router
+
+    - name: Delete security group ssh_http_https
+      openstack.cloud.security_group:
+        state: absent
+        name: ssh_http_https
+
+    - name: Delete security group icmp
+      openstack.cloud.security_group:
+        state: absent
+        name: icmp
+
+    - name: Delete security group mysql
+      openstack.cloud.security_group:
+        state: absent
+        name: mysql
+
+    - name: Delete subnet
+      openstack.cloud.subnet:
+        state: absent
+        name: wp_subnet
+
+    - name: Delete network
+      openstack.cloud.network:
+        state: absent
+        name: wp_network
